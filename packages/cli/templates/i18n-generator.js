@@ -18,6 +18,14 @@ export async function generateI18nConfig(cwd, languages, isNextJs = false) {
     initImmediate: false,
     react: {
       useSuspense: false,
+      // Keeps bare inline formatting tags readable in translation strings
+      // (extraction emits them via Trans — see transKeepBasicHtmlNodesFor docs)
+      transKeepBasicHtmlNodesFor: ['br', 'strong', 'b', 'em', 'i'],
+    },`;
+
+  const defaultOptions = `
+    react: {
+      transKeepBasicHtmlNodesFor: ['br', 'strong', 'b', 'em', 'i'],
     },`;
 
   const content = `import i18n from 'i18next';
@@ -30,7 +38,7 @@ i18n
   .use(HttpApi)
   .use(LanguageDetector)
   .use(initReactI18next)
-  .init({${isNextJs ? nextjsOptions : ''}
+  .init({${isNextJs ? nextjsOptions : defaultOptions}
     fallbackLng: defaultLocale,
     supportedLngs: locales.map(l => l.code),
     interpolation: {
