@@ -8,7 +8,7 @@
     "packages/*"
   ],
   "scripts": {
-    "test": "node --test packages/core/src/utils/*.test.js packages/core/src/extractors/*.test.js packages/cli/test/*.test.js"
+    "test": "node --test packages/core/src/utils/*.test.js packages/core/src/utils/i18n/*.test.js packages/core/src/extractors/*.test.js packages/core/src/translator/utils/*.test.js packages/cli/test/*.test.js"
   },
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
