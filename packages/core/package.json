@@ -22,7 +22,10 @@
     "recast": "^0.23.11"
   },
   "devDependencies": {
-    "jsdom": "^29.1.1",
+    "jsdom": "^26.1.0",
     "xmldom": "^0.6.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

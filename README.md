@@ -83,7 +83,7 @@ Meridian is a comprehensive internationalization automation tool that transforms
 
 ## Prerequisites
 
-- Node.js 18 or higher
+- Node.js 20 or higher (inquirer and other runtime dependencies require Node >= 20.12; Node 18 is end-of-life)
 - npm 9+ (using workspaces capabilities)
 
 ## Getting Started
