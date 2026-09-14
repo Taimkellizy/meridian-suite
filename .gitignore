@@ -1,7 +1,7 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-# dependencies
-/node_modules
+# dependencies (all depths - workspace packages have their own node_modules)
+node_modules/
 /.pnp
 .pnp.js
 
@@ -25,14 +25,13 @@ yarn-error.log*
 # Turborepo
 .turbo
 
-# graphify - temp/intermediate files (regenerated on each run)
-graphify-out/.graphify_*.json
-graphify-out/.graphify_chunk_*.json
-graphify-out/.graphify_uncached.txt
+# graphify - generated knowledge graph (regenerated on demand via /graphify)
+graphify-out/
 
-# graphify - local-only files (mtime-based, invalid after clone)
-graphify-out/cache/
-graphify-out/manifest.json
-graphify-out/cost.json
+# meridian dogfood state (tool-generated while testing meridian against this repo)
+.meridian/
+
+# vite build output
+apps/web/dist/
 
 /AI_STUFF
