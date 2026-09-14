@@ -80,15 +80,19 @@ export const extractAndTransformJSX = (codeString, options = {}) => {
         });
     } catch (e) {
         console.error("Parse Error in extractAndTransformJSX:", e);
-        return { modifiedCode: codeString, extractedStrings: new Map() };
+        return { modifiedCode: codeString, extractedStrings: new Map(), skipped: [] };
     }
 
     const extractedStrings = new Map();
     const ctx = {
         fileName: options.fileName,
+        source: codeString,
         needsImport: false,
+        needsTransImport: false,
         needsHook: false,
         injectedNodeSet: new Set(),
+        hookScopes: [],
+        skipped: [],
         registry: options.registry || null,
         edits: []
     };
@@ -107,22 +111,46 @@ export const extractAndTransformJSX = (codeString, options = {}) => {
         }
     }
     
-    if (ctx.needsImport || ctx.needsHook) {
+    if (ctx.needsImport || ctx.needsHook || ctx.needsTransImport) {
         const lastImportEnd = findLastImportEnd(ast);
         const importLibrary = options.useNextI18next ? 'next-i18next' : 'react-i18next';
-        
-        if (lastImportEnd >= 0) {
-            uniqueEdits.push({
-                start: lastImportEnd,
-                end: lastImportEnd,
-                replacement: `\nimport { useTranslation } from "${importLibrary}";`
-            });
+        const neededSpecifiers = [];
+        if (ctx.needsImport || ctx.needsHook) neededSpecifiers.push('useTranslation');
+        if (ctx.needsTransImport) neededSpecifiers.push('Trans');
+
+        const existingImport = ast.program.body.find(node =>
+            t.isImportDeclaration(node) && node.source.value === importLibrary
+        );
+
+        if (existingImport) {
+            const existingNames = existingImport.specifiers
+                .filter(specifier => t.isImportSpecifier(specifier) && t.isIdentifier(specifier.imported))
+                .map(specifier => specifier.imported.name);
+            const mergedNames = [...new Set([...existingNames, ...neededSpecifiers])];
+            const missingCount = neededSpecifiers.filter(name => !existingNames.includes(name)).length;
+
+            if (missingCount > 0) {
+                uniqueEdits.push({
+                    start: existingImport.start,
+                    end: existingImport.end,
+                    replacement: `import { ${mergedNames.join(', ')} } from "${importLibrary}";`
+                });
+            }
         } else {
-            uniqueEdits.push({
-                start: 0,
-                end: 0,
-                replacement: `import { useTranslation } from "${importLibrary}";\n`
-            });
+            const importStatement = `import { ${neededSpecifiers.join(', ')} } from "${importLibrary}";`;
+            if (lastImportEnd >= 0) {
+                uniqueEdits.push({
+                    start: lastImportEnd,
+                    end: lastImportEnd,
+                    replacement: `\n${importStatement}`
+                });
+            } else {
+                uniqueEdits.push({
+                    start: 0,
+                    end: 0,
+                    replacement: `${importStatement}\n`
+                });
+            }
         }
         
         const hookInfo = findHookInsertionPoint(ast, codeString);
@@ -194,14 +222,18 @@ export const extractAndTransformJSX = (codeString, options = {}) => {
     }
     
     if (uniqueEdits.length === 0) {
-        return { modifiedCode: codeString, extractedStrings };
+        return { modifiedCode: codeString, extractedStrings, skipped: ctx.skipped };
     }
-    
+
     try {
         const result = applyEdits(codeString, uniqueEdits);
-        return { modifiedCode: result, extractedStrings };
+        if (ctx.skipped.length > 0) {
+            const skippedLines = ctx.skipped.map(item => item.line).filter(Boolean).join(', ');
+            console.log(`meridian: skipped ${ctx.skipped.length} element(s) with unsupported expressions in ${options.fileName || 'file'} (lines ${skippedLines}) — left untouched`);
+        }
+        return { modifiedCode: result, extractedStrings, skipped: ctx.skipped };
     } catch (e) {
         console.error("Error applying edits:", e.message);
-        return { modifiedCode: codeString, extractedStrings };
+        return { modifiedCode: codeString, extractedStrings, skipped: ctx.skipped };
     }
 };

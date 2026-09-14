@@ -2,6 +2,8 @@ import * as t from '@babel/types';
 import * as recast from 'recast';
 import chalk from 'chalk';
 import { generateContextAwareKey } from '../../extractors/keyGenerator.js';
+import { applyEdits } from './applyEdits.js';
+import { injectHook } from './injectTranslation.js';
 
 const assertNotDataPromoted = (ctx) => {
     if (!ctx || !ctx.fileName) return;
@@ -15,8 +17,6 @@ const assertNotDataPromoted = (ctx) => {
         throw new Error('Data-promoted keys must never be passed to generateContextAwareKey. Path: ' + ctx.fileName);
     }
 };
-import { injectHook } from './injectTranslation.js';
-
 
 export const NEVER_WRAP_PROPS = [
     'className', 'key', 'id', 'href', 'src', 'onClick', 'style',
@@ -52,10 +52,6 @@ const addTranslationEdit = (path, ctx, expr) => {
     if (!injectHook(path, ctx)) return false;
 
     const newExpr = t.callExpression(t.identifier('t'), [expr]);
-    // The AST we're splicing against was parsed from a \r\n normalized string.
-    // However, expr.start and expr.end inside extractJSX rely on parseCode which gets called elsewhere.
-    // Actually, extractJSX itself is passed `source` but the AST is passed to it?
-    // Wait, extractJSX doesn't parse! It is just a visitor!
     ctx.edits.push({
         start: expr.start,
         end: expr.end,
@@ -105,7 +101,12 @@ export function shouldWrapMemberExpression(propName, objectName, fieldName, regi
     if (!registry) return false;
 
     if (!registryHasField(fieldName, registry)) {
-        console.log(chalk.yellow(`Warning: skipped uncertain expression ${objectName}.${fieldName}; object was not traced to a scanned data file. Add it to .meridianrc.json > dataFiles if it contains display text.`));
+        if (!ctx.warnedObjects) ctx.warnedObjects = new Set();
+        const warningKey = `${ctx.fileName}:${objectName}`;
+        if (!ctx.warnedObjects.has(warningKey)) {
+            ctx.warnedObjects.add(warningKey);
+            console.log(chalk.yellow(`Warning: skipped uncertain expression ${objectName}.${fieldName}; object was not traced to a scanned data file. Add it to .meridianrc.json > dataFiles if it contains display text.`));
+        }
         return false;
     }
 
@@ -290,45 +291,90 @@ const isTranslatableInterpolation = (node, registry) =>
     t.isIdentifier(node.property) &&
     isTranslatableField(node.property.name, registry);
 
+const KEEP_INLINE_TAGS = new Set(['strong', 'b', 'em', 'i', 'br']);
+
+const isWhitespaceOnlyText = (value) => value.trim() === '';
+
+const isInlineCollectible = (elementNode) => {
+    if (!t.isJSXElement(elementNode)) return false;
+    return elementNode.children.every((child) => {
+        if (t.isJSXText(child)) return true;
+        if (t.isJSXExpressionContainer(child)) {
+            return t.isJSXEmptyExpression(child.expression) ||
+                isSimpleInterpolationExpression(child.expression);
+        }
+        if (t.isJSXElement(child)) return isInlineCollectible(child);
+        return false;
+    });
+};
+
 const collectTextRun = (children, startIndex) => {
-    let textStr = '';
-    const variables = [];
+    const segments = [];
     let hasText = false;
     let index = startIndex;
+    let stoppedOn = null;
 
     while (index < children.length) {
         const child = children[index];
 
         if (t.isJSXText(child)) {
-            textStr += child.value;
-            hasText = hasText || child.value.trim() !== '';
+            segments.push({ type: 'text', value: child.value, node: child });
+            hasText = hasText || !isWhitespaceOnlyText(child.value);
             index++;
             continue;
         }
 
-        if (
-            t.isJSXExpressionContainer(child) &&
-            !t.isJSXEmptyExpression(child.expression) &&
-            isSimpleInterpolationExpression(child.expression)
-        ) {
-            const varName = getInterpolationName(child.expression, variables.length);
-            const isShorthand = t.isIdentifier(child.expression) && child.expression.name === varName;
-            textStr += `{{${varName}}}`;
-            variables.push(t.objectProperty(
-                t.identifier(varName),
-                child.expression,
-                false,
-                isShorthand
-            ));
-            index++;
-            continue;
+        if (t.isJSXExpressionContainer(child)) {
+            if (t.isJSXEmptyExpression(child.expression)) {
+                index++;
+                continue;
+            }
+
+            if (isSimpleInterpolationExpression(child.expression)) {
+                const variableCount = segments.filter(s => s.type === 'variable').length;
+                const varName = getInterpolationName(child.expression, variableCount);
+                const isShorthand = t.isIdentifier(child.expression) && child.expression.name === varName;
+                segments.push({ type: 'variable', name: varName, node: child.expression, isShorthand });
+                index++;
+                continue;
+            }
+
+            stoppedOn = 'complex-expression';
+            break;
         }
 
+        if (t.isJSXElement(child)) {
+            if (isInlineCollectible(child)) {
+                segments.push({ type: 'element', node: child });
+                index++;
+                continue;
+            }
+
+            stoppedOn = 'uncollectable-element';
+            break;
+        }
+
+        stoppedOn = 'uncollectable-element';
         break;
     }
 
-    return { textStr, variables, hasText, endIndex: index };
+    return { segments, hasText, endIndex: index, stoppedOn };
 };
+
+const getRunVariables = (segments) => segments
+    .filter(segment => segment.type === 'variable')
+    .map(segment => t.objectProperty(
+        t.identifier(segment.name),
+        segment.node,
+        false,
+        segment.isShorthand
+    ));
+
+const getRunText = (segments) => segments.map(segment => {
+    if (segment.type === 'text') return segment.value;
+    if (segment.type === 'variable') return `{{${segment.name}}}`;
+    return '';
+}).join('');
 
 const getOnlyExpression = (children, startIndex, endIndex) => {
     const expressionContainer = children.slice(startIndex, endIndex).find(
@@ -377,10 +423,13 @@ const buildTextReplacement = (textStr, key, variables) => {
     return replacement;
 };
 
+const EXTRACTABLE_ATTRIBUTES = ['placeholder', 'title', 'alt', 'aria-label'];
+
 const handleAttributeStrings = (path, extractedMap, ctx) => {
     path.node.openingElement.attributes.forEach((attr) => {
-        if (!t.isJSXAttribute(attr) || !t.isJSXIdentifier(attr.name)) return;
-        if (!['placeholder', 'title'].includes(attr.name.name)) return;
+        if (!t.isJSXAttribute(attr)) return;
+        const attrName = getAttributeName(attr);
+        if (!attrName || !EXTRACTABLE_ATTRIBUTES.includes(attrName)) return;
         if (!t.isStringLiteral(attr.value) || attr.value.value.trim() === '') return;
         if (!injectHook(path, ctx)) return;
 
@@ -405,17 +454,188 @@ const hasMeridianIgnore = (path) =>
         t.isJSXAttribute(attr) && attr.name.name === 'data-meridian-ignore'
     );
 
+const getAttributeName = (attr) => {
+    if (t.isJSXIdentifier(attr.name)) return attr.name.name;
+    if (t.isJSXNamespacedName(attr.name)) {
+        return `${attr.name.namespace.name}:${attr.name.name.name}`;
+    }
+    return null;
+};
+
+const recordSkippedElement = (ctx, elementNode, reason) => {
+    if (!ctx.skipped) return;
+    const nameNode = elementNode.openingElement?.name;
+    const tag = t.isJSXIdentifier(nameNode) ? nameNode.name : 'element';
+    ctx.skipped.push({
+        tag,
+        line: elementNode.loc?.start?.line ?? null,
+        reason
+    });
+};
+
+const buildValueFromChildren = (children) => {
+    let result = '';
+    for (let i = 0; i < children.length; i++) {
+        const child = children[i];
+
+        if (t.isJSXText(child)) {
+            result += child.value;
+            continue;
+        }
+
+        if (t.isJSXExpressionContainer(child)) {
+            if (t.isJSXEmptyExpression(child.expression)) continue;
+            if (isSimpleInterpolationExpression(child.expression)) {
+                result += `{{${getInterpolationName(child.expression, 0)}}}`;
+            }
+            continue;
+        }
+
+        if (t.isJSXElement(child)) {
+            const nameNode = child.openingElement.name;
+            const tagName = t.isJSXIdentifier(nameNode) ? nameNode.name : null;
+            const isBareKeepTag = tagName !== null &&
+                KEEP_INLINE_TAGS.has(tagName) &&
+                child.openingElement.attributes.length === 0;
+            const inner = buildValueFromChildren(child.children);
+
+            if (isBareKeepTag) {
+                result += (child.selfClosing || inner === '') ? `<${tagName}/>` : `<${tagName}>${inner}</${tagName}>`;
+                continue;
+            }
+
+            result += `<${i}>${inner}</${i}>`;
+        }
+    }
+    return result;
+};
+
+const collectInterpolationContainers = (elementNode, containers) => {
+    for (const child of elementNode.children) {
+        if (t.isJSXExpressionContainer(child)) {
+            if (!t.isJSXEmptyExpression(child.expression) && isSimpleInterpolationExpression(child.expression)) {
+                containers.push(child);
+            }
+            continue;
+        }
+        if (t.isJSXElement(child)) {
+            collectInterpolationContainers(child, containers);
+        }
+    }
+};
+
+const interpolationToObjectShorthand = (expr, source) => {
+    if (t.isIdentifier(expr)) {
+        return `{{ ${expr.name} }}`;
+    }
+    const name = getInterpolationName(expr, 0);
+    return `{{ ${name}: ${source.slice(expr.start, expr.end)} }}`;
+};
+
+const markTransConsumedElements = (ctx, children, startIndex, endIndex) => {
+    if (!ctx.transConsumedNodes) ctx.transConsumedNodes = new Set();
+    for (let i = startIndex; i < endIndex; i++) {
+        const child = children[i];
+        if (t.isJSXElement(child)) {
+            markElementTreeConsumed(ctx, child);
+        }
+    }
+};
+
+const markElementTreeConsumed = (ctx, elementNode) => {
+    ctx.transConsumedNodes.add(elementNode);
+    for (const child of elementNode.children) {
+        if (t.isJSXElement(child)) {
+            markElementTreeConsumed(ctx, child);
+        }
+    }
+};
+
+const buildTransReplacement = (children, startIndex, endIndex, key, ctx) => {
+    const runStart = children[startIndex].start;
+    const runEnd = children[endIndex - 1].end;
+    const innerSource = ctx.source.slice(runStart, runEnd);
+
+    const containers = [];
+    for (let i = startIndex; i < endIndex; i++) {
+        const child = children[i];
+        if (t.isJSXExpressionContainer(child) && !t.isJSXEmptyExpression(child.expression)) {
+            if (isSimpleInterpolationExpression(child.expression)) {
+                containers.push(child);
+            }
+            continue;
+        }
+        if (t.isJSXElement(child)) {
+            collectInterpolationContainers(child, containers);
+        }
+    }
+
+    const relativeEdits = containers.map(container => ({
+        start: container.start - runStart,
+        end: container.end - runStart,
+        replacement: interpolationToObjectShorthand(container.expression, ctx.source)
+    }));
+
+    const inner = relativeEdits.length > 0 ? applyEdits(innerSource, relativeEdits) : innerSource;
+    return {
+        start: runStart,
+        end: runEnd,
+        replacement: `<Trans i18nKey="${key}">${inner}</Trans>`
+    };
+};
+
 const handleTextRun = (path, extractedMap, ctx, startIndex, childEditRanges) => {
     const children = path.node.children;
-    const { textStr, variables, hasText, endIndex } = collectTextRun(children, startIndex);
-    if (endIndex === startIndex) return startIndex + 1;
+    const { segments, hasText, endIndex, stoppedOn } = collectTextRun(children, startIndex);
+    if (endIndex === startIndex && stoppedOn === null) return startIndex + 1;
+
+    const variables = getRunVariables(segments);
+    const textStr = getRunText(segments);
+    const hasElements = segments.some(segment => segment.type === 'element');
+    const hasRunContent = hasText || variables.length > 0;
+
+    if (stoppedOn !== null) {
+        if (stoppedOn === 'complex-expression' || hasRunContent) {
+            recordSkippedElement(ctx, path.node, stoppedOn);
+            return children.length;
+        }
+        return endIndex;
+    }
 
     const normalizedText = textStr.trim().replace(/\s+/g, ' ');
 
-    if (hasText && normalizedText.length > 0) {
-        if (variables.length > 0 && variables.every(variable =>
+    if (hasElements && hasRunContent) {
+        const hasRegistryVariables = variables.some(variable =>
             isTranslatableInterpolation(variable.value, ctx.registry)
-        )) {
+        );
+        if (hasRegistryVariables) {
+            recordSkippedElement(ctx, path.node, 'data-promoted-variable-with-inline-markup');
+            return children.length;
+        }
+
+        if (!ctx.source) {
+            recordSkippedElement(ctx, path.node, 'missing-source-for-trans');
+            return endIndex;
+        }
+
+        ctx.needsTransImport = true;
+        const value = buildValueFromChildren(children.slice(startIndex, endIndex))
+            .replace(/\s+/g, ' ')
+            .trim();
+        assertNotDataPromoted(ctx);
+        const key = generateContextAwareKey(path, ctx, value);
+        extractedMap.set(key, value);
+        markTransConsumedElements(ctx, children, startIndex, endIndex);
+        childEditRanges.push(buildTransReplacement(children, startIndex, endIndex, key, ctx));
+        return endIndex;
+    }
+
+    if (hasText && normalizedText.length > 0 && !hasElements) {
+        const allVariablesTranslatable = variables.length > 0 && variables.every(variable =>
+            isTranslatableInterpolation(variable.value, ctx.registry)
+        );
+
+        if (allVariablesTranslatable && !hasElements) {
             if (injectHook(path, ctx)) {
                 for (let i = startIndex; i < endIndex; i++) {
                     const child = children[i];
@@ -447,7 +667,7 @@ const handleTextRun = (path, extractedMap, ctx, startIndex, childEditRanges) => 
         return endIndex;
     }
 
-    if (!hasText && variables.length === 1) {
+    if (!hasText && variables.length === 1 && !hasElements) {
         const onlyExpr = getOnlyExpression(children, startIndex, endIndex);
         if (onlyExpr && shouldWrapBareExpression(onlyExpr, ctx) && injectHook(path, ctx)) {
             childEditRanges.push({
@@ -458,6 +678,10 @@ const handleTextRun = (path, extractedMap, ctx, startIndex, childEditRanges) => 
         } else {
             pushRemovalPlaceholders(childEditRanges, children, startIndex, endIndex);
         }
+        return endIndex;
+    }
+
+    if (!hasText && variables.length === 0 && hasElements) {
         return endIndex;
     }
 
@@ -521,6 +745,11 @@ export const buildExtractVisitor = (extractedMap, ctx) => ({
     },
 
     JSXElement(path) {
+        if (ctx.transConsumedNodes?.has(path.node)) {
+            path.skip();
+            return;
+        }
+
         if (hasMeridianIgnore(path)) {
             path.skip();
             return;
