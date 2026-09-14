@@ -25,5 +25,8 @@
     "figlet": "^1.10.0",
     "inquirer": "^13.3.0",
     "nanospinner": "^1.2.2"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

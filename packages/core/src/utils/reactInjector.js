@@ -1,8 +1,7 @@
-import fs from 'fs';
+﻿import fs from 'fs';
 import path from 'path';
 import { parse } from '@babel/parser';
 import * as t from '@babel/types';
-import * as recast from 'recast';
 import { applyEdits } from './i18n/applyEdits.js';
 import { analyzeProviderScope } from './reactInjection/detectScope.js';
 import { generateImportEdits, generateToggleImportEdits } from './reactInjection/injectImports.js';
@@ -11,21 +10,16 @@ import { analyzeExportDefault, analyzeToggleTarget, generateProviderWrapperEdit,
 
 /**
  * Parses source code into AST with support for JSX, TypeScript, and modern JS features.
+ * Uses @babel/parser directly (not recast) so that node offsets are always computed
+ * against the exact source string being spliced later â€” recast remaps positions
+ * depending on the runtime environment, which corrupts string-offset edits.
  * @param {string} code - Source code to parse
  * @returns {import('@babel/parser').ParseResult} Parsed AST
  */
 const getAST = (code) => {
-    const plugins = ["jsx", "typescript", "classProperties", "dynamicImport", "exportDefaultFrom", "exportNamespaceFrom"];
-    return recast.parse(code, {
-        parser: {
-            parse(source) {
-                return parse(source, {
-                    sourceType: "module",
-                    plugins: plugins,
-                    tokens: true
-                });
-            }
-        }
+    return parse(code, {
+        sourceType: "module",
+        plugins: ["jsx", "typescript", "classProperties", "dynamicImport", "exportDefaultFrom", "exportNamespaceFrom"]
     });
 };
 
@@ -104,14 +98,12 @@ function checkLayoutProvider(fileName) {
  * @returns {string} Modified code
  */
 export const injectProvider = (rawCode, config = {}, fileName = '') => {
-    // Normalize to CRLF to ensure AST offsets perfectly match string slice offsets
-    const code = rawCode.replace(/\r?\n/g, '\r\n');
     let ast;
     try {
-        ast = getAST(code);
+        ast = getAST(rawCode);
     } catch (e) {
         console.error("Parse Error in injectProvider:", e);
-        return code;
+        return rawCode;
     }
 
     const scope = analyzeProviderScope(ast);
@@ -134,12 +126,12 @@ export const injectProvider = (rawCode, config = {}, fileName = '') => {
 
     const isAppRouterLayout = config.isNextJs && fileName && (fileName.endsWith('layout.jsx') || fileName.endsWith('layout.tsx'));
 
-    if (isFullyInjected) return code;
-    if (!scope.exportDefaultNodePath && !isAppRouterLayout) return code;
+    if (isFullyInjected) return rawCode;
+    if (!scope.exportDefaultNodePath && !isAppRouterLayout) return rawCode;
 
     const edits = [];
 
-    const importEdits = generateImportEdits(code, ast, fileName, {
+    const importEdits = generateImportEdits(rawCode, ast, fileName, {
         hasContextImport: scope.hasContextImport,
         hasReactImport: scope.hasReactImport,
         useI18next: config.i18next
@@ -179,19 +171,19 @@ export const injectProvider = (rawCode, config = {}, fileName = '') => {
             exportInfo = analyzeExportDefault(ast);
         }
 
-        const wrapperEdit = generateProviderWrapperEdit(code, exportInfo, isAppRouterLayout, appRouterInfo);
+        const wrapperEdit = generateProviderWrapperEdit(rawCode, exportInfo, isAppRouterLayout, appRouterInfo);
         if (wrapperEdit) {
             edits.push(wrapperEdit);
         }
     }
 
-    if (edits.length === 0) return code;
+    if (edits.length === 0) return rawCode;
 
     try {
-        return applyEdits(code, edits);
+        return applyEdits(rawCode, edits);
     } catch (e) {
         console.error("Error applying provider edits:", e.message);
-        return code;
+        return rawCode;
     }
 };
 
@@ -204,39 +196,37 @@ export const injectProvider = (rawCode, config = {}, fileName = '') => {
  * @returns {{code: string, injected: boolean}} Result with modified code and injected status
  */
 export const injectToggle = (rawCode, targetConfig = { tag: "nav" }, fileName = '') => {
-    // Normalize to CRLF to ensure AST offsets perfectly match string slice offsets
-    const code = rawCode.replace(/\r?\n/g, '\r\n');
     let ast;
     try {
-        ast = getAST(code);
+        ast = getAST(rawCode);
     } catch (e) {
         console.error("Parse Error in injectToggle:", e);
-        return { code, injected: false };
+        return { code: rawCode, injected: false };
     }
 
     const edits = [];
 
-    const importEdits = generateToggleImportEdits(code, ast, fileName);
+    const importEdits = generateToggleImportEdits(rawCode, ast, fileName);
     edits.push(...importEdits);
 
     const targetInfo = analyzeToggleTarget(ast, targetConfig);
     
     if (targetInfo && !targetInfo.alreadyInjected && targetInfo.targetNode) {
-        const toggleEdit = generateToggleInsertEdit(code, targetInfo);
+        const toggleEdit = generateToggleInsertEdit(rawCode, targetInfo);
         if (toggleEdit) {
             edits.push(toggleEdit);
         }
     }
 
     if (edits.length === 0) {
-        return { code, injected: false };
+        return { code: rawCode, injected: false };
     }
 
     try {
-        const result = applyEdits(code, edits);
+        const result = applyEdits(rawCode, edits);
         return { code: result, injected: !!targetInfo && !targetInfo.alreadyInjected };
     } catch (e) {
         console.error("Error applying toggle edits:", e.message);
-        return { code, injected: false };
+        return { code: rawCode, injected: false };
     }
 };
