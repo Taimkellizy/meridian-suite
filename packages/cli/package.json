@@ -1,0 +1,29 @@
+{
+  "name": "@meridian/cli",
+  "version": "1.0.0",
+  "description": "CLI interface for Meridian Suite",
+  "type": "module",
+  "main": "bin/meridian.js",
+  "bin": {
+    "meridian": "bin/meridian.js"
+  },
+  "scripts": {
+    "build": "echo \"Building @meridian/cli...\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Taim Kellizy",
+  "license": "MIT",
+  "dependencies": {
+    "@babel/core": "^7.29.0",
+    "@meridian/core": "*",
+    "@meridian/translator": "*",
+    "chalk": "^4.1.2",
+    "chalk-animation": "^2.0.3",
+    "commander": "^8.3.0",
+    "dotenv": "^17.4.1",
+    "execa": "^9.6.1",
+    "figlet": "^1.10.0",
+    "inquirer": "^13.3.0",
+    "nanospinner": "^1.2.2"
+  }
+}

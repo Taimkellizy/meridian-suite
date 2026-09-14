@@ -1,58 +1,20 @@
 {
-  "name": "arabify-rtl",
-  "version": "0.7.0",
+  "name": "meridian-monorepo",
+  "version": "1.0.0",
   "private": true,
-  "dependencies": {
-    "@fortawesome/fontawesome-svg-core": "^7.1.0",
-    "@fortawesome/free-brands-svg-icons": "^7.1.0",
-    "@fortawesome/free-regular-svg-icons": "^7.1.0",
-    "@fortawesome/free-solid-svg-icons": "^7.1.0",
-    "@fortawesome/react-fontawesome": "^3.1.0",
-    "@gsap/react": "^2.1.2",
-    "@testing-library/dom": "^10.4.1",
-    "@testing-library/jest-dom": "^6.9.1",
-    "@testing-library/react": "^16.3.0",
-    "@testing-library/user-event": "^13.5.0",
-    "gsap": "^3.13.0",
-    "jszip": "^3.10.1",
-    "postcss": "^8.5.6",
-    "postcss-safe-parser": "^7.0.1",
-    "postprocessing": "^6.38.0",
-    "react": "^19.2.0",
-    "react-bits": "^1.0.5",
-    "react-confetti": "^6.4.0",
-    "react-dom": "^19.2.0",
-    "react-router-dom": "^6.30.3",
-    "react-scripts": "^5.0.1",
-    "react-syntax-highlighter": "^16.1.0",
-    "three": "^0.181.2",
-    "web-vitals": "^2.1.4"
-  },
+  "packageManager": "npm@11.6.3",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
-  },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+    "test": "node --test packages/core/src/utils/*.test.js packages/cli/test/*.test.js"
   },
   "devDependencies": {
-    "baseline-browser-mapping": "^2.9.16"
+    "@changesets/cli": "^2.30.0",
+    "turbo": "^2.9.6"
+  },
+  "dependencies": {
+    "tailwindcss-logical": "^2.0.0"
   }
 }

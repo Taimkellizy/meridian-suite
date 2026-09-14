@@ -1,0 +1,28 @@
+{
+  "name": "@meridian/core",
+  "version": "1.0.0",
+  "description": "Core logic for Meridian Suite",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "build": "echo \"Building @meridian/core...\"",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Taim Kellizy",
+  "license": "MIT",
+  "dependencies": {
+    "@babel/generator": "^7.29.1",
+    "@babel/parser": "^7.29.0",
+    "@babel/traverse": "^7.29.0",
+    "@babel/types": "^7.29.0",
+    "chalk": "^4.1.2",
+    "node-html-parser": "^7.1.0",
+    "postcss": "^8.5.6",
+    "postcss-safe-parser": "^7.0.1",
+    "recast": "^0.23.11"
+  },
+  "devDependencies": {
+    "jsdom": "^29.1.1",
+    "xmldom": "^0.6.0"
+  }
+}
