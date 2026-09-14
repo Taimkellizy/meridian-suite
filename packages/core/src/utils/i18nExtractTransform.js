@@ -16,49 +16,73 @@ const findLastImportEnd = (ast) => {
     return lastEnd;
 };
 
-const findHookInsertionPoint = (ast, source) => {
-    let targetFunc = null;
+const inferHookBodyIndent = (funcNode, source) => {
+    let indent = '  ';
+    const firstStmt = funcNode.body.body[0];
 
-    for (const node of ast.program.body) {
-        if (t.isExportNamedDeclaration(node) && t.isVariableDeclaration(node.declaration)) {
-            const decl = node.declaration;
-            if (t.isVariableDeclarator(decl.declarations[0]) && t.isArrowFunctionExpression(decl.declarations[0].init)) {
-                targetFunc = node;
-                break;
-            }
-        }
-        if (t.isVariableDeclaration(node)) {
-            const decl = node.declarations[0];
-            if (decl && decl.init && t.isArrowFunctionExpression(decl.init)) {
-                const varName = decl.id.name;
-                if (varName && varName[0] === varName[0].toUpperCase()) {
-                    targetFunc = node;
-                    break;
-                }
+    if (firstStmt) {
+        const stmtSource = source.slice(firstStmt.start, firstStmt.end);
+        const indentMatch = stmtSource.match(/^(\s*)/);
+        if (indentMatch && indentMatch[1]) {
+            indent = indentMatch[1].replace(/[^\s]/g, ' ');
+            if (!indent.includes('\n')) {
+                indent = indent + '  ';
+            } else {
+                indent = indent.replace('\n', '') + '  ';
             }
         }
     }
 
-    if (!targetFunc) return null;
-    
-    const funcNode = targetFunc.declaration
-        ? (targetFunc.declaration.declarations?.[0]?.init || targetFunc.declaration.init)
-        : targetFunc.declarations?.[0]?.init;
-    if (!funcNode) return null;
-
-    if (t.isArrowFunctionExpression(funcNode)) {
-        if (t.isBlockStatement(funcNode.body)) {
-            return { type: 'block', bodyStart: funcNode.body.start, node: funcNode };
-        } else {
-            return { type: 'implicit', start: funcNode.start, end: funcNode.end, node: funcNode };
+    if (indent === '  ' || !indent) {
+        const beforeBrace = source.slice(funcNode.start, funcNode.body.start + 1);
+        const braceLine = beforeBrace.split('\n').slice(-1)[0];
+        const braceIndent = braceLine.match(/^\s*/);
+        if (braceIndent) {
+            indent = braceIndent[0] + '  ';
         }
     }
-    
-    if (t.isFunctionDeclaration(funcNode)) {
-        return { type: 'block', bodyStart: funcNode.body.start, node: funcNode };
+
+    return indent;
+};
+
+const buildHookEdit = (funcPath, source, uniqueEdits) => {
+    const funcNode = funcPath.node;
+    const HOOK_STATEMENT = 'const { t } = useTranslation();';
+
+    if (t.isBlockStatement(funcNode.body)) {
+        const indent = inferHookBodyIndent(funcNode, source);
+        return {
+            start: funcNode.body.start + 1,
+            end: funcNode.body.start + 1,
+            replacement: '\n' + indent + HOOK_STATEMENT
+        };
     }
-    
-    return null;
+
+    const bodyEdits = uniqueEdits.filter(edit =>
+        edit.start >= funcNode.body.start && edit.end <= funcNode.body.end
+    );
+    const bodySource = source.slice(funcNode.body.start, funcNode.body.end);
+    const transformedBody = applyEdits(
+        bodySource,
+        bodyEdits.map(edit => ({
+            ...edit,
+            start: edit.start - funcNode.body.start,
+            end: edit.end - funcNode.body.start
+        }))
+    );
+    const arrowPrefix = source.slice(funcNode.start, funcNode.body.start);
+
+    uniqueEdits.forEach(edit => {
+        if (edit.start >= funcNode.body.start && edit.end <= funcNode.body.end) {
+            edit.skip = true;
+        }
+    });
+
+    return {
+        start: funcNode.start,
+        end: funcNode.end,
+        replacement: arrowPrefix + '{\n  ' + HOOK_STATEMENT + '\n  return ' + transformedBody + ';\n}'
+    };
 };
 
 export const extractAndTransformJSX = (codeString, options = {}) => {
@@ -80,15 +104,19 @@ export const extractAndTransformJSX = (codeString, options = {}) => {
         });
     } catch (e) {
         console.error("Parse Error in extractAndTransformJSX:", e);
-        return { modifiedCode: codeString, extractedStrings: new Map() };
+        return { modifiedCode: codeString, extractedStrings: new Map(), skipped: [] };
     }
 
     const extractedStrings = new Map();
     const ctx = {
         fileName: options.fileName,
+        source: codeString,
         needsImport: false,
+        needsTransImport: false,
         needsHook: false,
         injectedNodeSet: new Set(),
+        hookScopes: [],
+        skipped: [],
         registry: options.registry || null,
         edits: []
     };
@@ -107,101 +135,70 @@ export const extractAndTransformJSX = (codeString, options = {}) => {
         }
     }
     
-    if (ctx.needsImport || ctx.needsHook) {
+    if (ctx.needsImport || ctx.needsHook || ctx.needsTransImport) {
         const lastImportEnd = findLastImportEnd(ast);
         const importLibrary = options.useNextI18next ? 'next-i18next' : 'react-i18next';
-        
-        if (lastImportEnd >= 0) {
-            uniqueEdits.push({
-                start: lastImportEnd,
-                end: lastImportEnd,
-                replacement: `\nimport { useTranslation } from "${importLibrary}";`
-            });
+        const neededSpecifiers = [];
+        if (ctx.needsImport || ctx.needsHook) neededSpecifiers.push('useTranslation');
+        if (ctx.needsTransImport) neededSpecifiers.push('Trans');
+
+        const existingImport = ast.program.body.find(node =>
+            t.isImportDeclaration(node) && node.source.value === importLibrary
+        );
+
+        if (existingImport) {
+            const existingNames = existingImport.specifiers
+                .filter(specifier => t.isImportSpecifier(specifier) && t.isIdentifier(specifier.imported))
+                .map(specifier => specifier.imported.name);
+            const mergedNames = [...new Set([...existingNames, ...neededSpecifiers])];
+            const missingCount = neededSpecifiers.filter(name => !existingNames.includes(name)).length;
+
+            if (missingCount > 0) {
+                uniqueEdits.push({
+                    start: existingImport.start,
+                    end: existingImport.end,
+                    replacement: `import { ${mergedNames.join(', ')} } from "${importLibrary}";`
+                });
+            }
         } else {
-            uniqueEdits.push({
-                start: 0,
-                end: 0,
-                replacement: `import { useTranslation } from "${importLibrary}";\n`
-            });
+            const importStatement = `import { ${neededSpecifiers.join(', ')} } from "${importLibrary}";`;
+            if (lastImportEnd >= 0) {
+                uniqueEdits.push({
+                    start: lastImportEnd,
+                    end: lastImportEnd,
+                    replacement: `\n${importStatement}`
+                });
+            } else {
+                uniqueEdits.push({
+                    start: 0,
+                    end: 0,
+                    replacement: `${importStatement}\n`
+                });
+            }
         }
         
-        const hookInfo = findHookInsertionPoint(ast, codeString);
-        
-        if (hookInfo) {
-            if (hookInfo.type === 'block') {
-                let indent = '  ';
-                const firstStmt = hookInfo.node.body.body[0];
-                
-                if (firstStmt) {
-                    const stmtSource = codeString.slice(firstStmt.start, firstStmt.end);
-                    const indentMatch = stmtSource.match(/^(\s*)/);
-                    if (indentMatch && indentMatch[1]) {
-                        indent = indentMatch[1].replace(/[^\s]/g, ' ');
-                        if (!indent.includes('\n')) {
-                            indent = indent + '  ';
-                        } else {
-                            indent = indent.replace('\n', '') + '  ';
-                        }
-                    }
-                }
-                
-                // Fallback: detect indent from the function's opening brace line
-                if (indent === '  ' || !indent) {
-                    const funcLineStart = hookInfo.node.start;
-                    const bodyStart = hookInfo.bodyStart;
-                    const beforeBrace = codeString.slice(funcLineStart, bodyStart + 1);
-                    const braceLine = beforeBrace.split('\n').slice(-1)[0];
-                    const braceIndent = braceLine.match(/^\s*/);
-                    if (braceIndent) {
-                        indent = braceIndent[0] + '  ';
-                    }
-                }
-                
-                uniqueEdits.push({
-                    start: hookInfo.bodyStart + 1,
-                    end: hookInfo.bodyStart + 1,
-                    replacement: '\n' + indent + 'const { t } = useTranslation();'
-                });
-            } else if (hookInfo.type === 'implicit') {
-                const node = hookInfo.node;
-                const bodyEdits = uniqueEdits.filter(e =>
-                    e.start >= node.body.start && e.end <= node.body.end
-                );
-                const bodySource = codeString.slice(node.body.start, node.body.end);
-                const transformedBody = applyEdits(
-                    bodySource,
-                    bodyEdits.map(e => ({
-                        ...e,
-                        start: e.start - node.body.start,
-                        end: e.end - node.body.start
-                    }))
-                );
-                const arrowPrefix = codeString.slice(node.start, node.body.start);
-                
-                uniqueEdits.forEach(e => {
-                    if (e.start >= node.body.start && e.end <= node.body.end) {
-                        e.skip = true;
-                    }
-                });
-                
-                uniqueEdits.push({
-                    start: node.start,
-                    end: node.end,
-                    replacement: arrowPrefix + '{\n  const { t } = useTranslation();\n  return ' + transformedBody + ';\n}'
-                });
+        const hookScopes = [...ctx.hookScopes].sort((a, b) => b.node.start - a.node.start);
+        for (const funcPath of hookScopes) {
+            const hookEdit = buildHookEdit(funcPath, codeString, uniqueEdits);
+            if (hookEdit) {
+                uniqueEdits.push(hookEdit);
             }
         }
     }
     
     if (uniqueEdits.length === 0) {
-        return { modifiedCode: codeString, extractedStrings };
+        return { modifiedCode: codeString, extractedStrings, skipped: ctx.skipped };
     }
-    
+
     try {
         const result = applyEdits(codeString, uniqueEdits);
-        return { modifiedCode: result, extractedStrings };
+        if (ctx.skipped.length > 0) {
+            const skippedLines = ctx.skipped.map(item => item.line).filter(Boolean).join(', ');
+            console.log(`meridian: skipped ${ctx.skipped.length} element(s) with unsupported expressions in ${options.fileName || 'file'} (lines ${skippedLines}) — left untouched`);
+        }
+        return { modifiedCode: result, extractedStrings, skipped: ctx.skipped };
     } catch (e) {
         console.error("Error applying edits:", e.message);
-        return { modifiedCode: codeString, extractedStrings };
+        return { modifiedCode: codeString, extractedStrings, skipped: ctx.skipped };
     }
 };
