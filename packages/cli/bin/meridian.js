@@ -10,6 +10,8 @@ import { fileURLToPath } from 'url';
 import inquirer from 'inquirer';
 import { createSpinner } from 'nanospinner';
 import { saveConfig } from '../utils/config.js';
+import { readJsonFile } from '../utils/jsonConfig.js';
+import { saveApiKeyToEnv } from '../utils/envKeyWrite.js';
 import { detectTailwind, runModifications } from '../utils/runner.js';
 import { runTranslations } from '../utils/translator-runner.js';
 import { runSync } from '../utils/sync-runner.js';
@@ -246,12 +248,11 @@ program
     let keySavedMsg = '';
     if (collectedApiKey) {
       const envPath = path.join(process.cwd(), '.env');
-      if (fs.existsSync(envPath)) {
-        fs.appendFileSync(envPath, `\nMERIDIAN_API_KEY=${collectedApiKey}\n`);
-      } else {
-        fs.writeFileSync(envPath, `MERIDIAN_API_KEY=${collectedApiKey}\n`);
+      const envStatus = saveApiKeyToEnv(envPath, collectedApiKey);
+      if (envStatus === 'exists') {
+        console.log(chalk.yellow('   MERIDIAN_API_KEY already set in .env — keeping the existing value.'));
       }
-      
+
       const gitignorePath = path.join(process.cwd(), '.gitignore');
       if (fs.existsSync(gitignorePath)) {
         let gitignoreContent = fs.readFileSync(gitignorePath, 'utf8');
@@ -328,7 +329,7 @@ program
     }
 
     try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const config = readJsonFile(configPath);
       const spinner = createSpinner('Syncing data files...').start();
       await runSync(process.cwd(), config, spinner, cliLanguages, options);
     } catch (err) {
@@ -347,7 +348,7 @@ program
     }
 
     try {
-      const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const config = readJsonFile(configPath);
       if (!config.translation) {
         console.log(chalk.yellow('⚠️  Translation is disabled or not configured in .meridianrc.json.'));
         return;
@@ -449,13 +450,13 @@ program
   .option('--mode <mode>', 'Insert mode: append or prepend', 'append')
   .option('--class <className>', 'Custom CSS class for the toggle')
   .action(async (options) => {
-    const configPath = path.join(process.cwd(), '.meridianrc.json');
-    if (!fs.existsSync(configPath)) {
-      console.log(chalk.red('❌ Error: .meridianrc.json not found. Run `meridian init` first.'));
+    let config;
+    try {
+      config = readJsonFile(path.join(process.cwd(), '.meridianrc.json'));
+    } catch (err) {
+      console.log(chalk.red(`❌ Error: ${err.message}`));
       process.exit(1);
     }
-
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
     if (!options.position && !options.file) {
       console.log(chalk.yellow('⚠️  Please provide a --position (e.g., nav) or --file path (e.g., src/components/Header.jsx)'));
@@ -486,12 +487,7 @@ program
   .command('sync-config')
   .description('Generate src/i18n/locales.ts from .meridianrc.json')
   .action(() => {
-    const configPath = path.join(process.cwd(), '.meridianrc.json');
-    if (!fs.existsSync(configPath)) {
-      console.log(chalk.red('❌ Error: .meridianrc.json not found. Run `meridian init` first.'));
-      process.exit(1);
-    }
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const config = readJsonFile(path.join(process.cwd(), '.meridianrc.json'));
     try {
       runSyncConfig(process.cwd(), config);
     } catch (err) {
@@ -503,12 +499,7 @@ program
   .command('doctor')
   .description('Scan project for issues like hardcoded language arrays')
   .action(() => {
-    const configPath = path.join(process.cwd(), '.meridianrc.json');
-    if (!fs.existsSync(configPath)) {
-      console.log(chalk.red('❌ Error: .meridianrc.json not found. Run `meridian init` first.'));
-      process.exit(1);
-    }
-    const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const config = readJsonFile(path.join(process.cwd(), '.meridianrc.json'));
     try {
       runDoctor(process.cwd(), config);
     } catch (err) {
