@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import { execSync } from 'child_process';
@@ -11,6 +12,9 @@ import { runTranslations } from './translator-runner.js';
 import { scanDataFiles, promoteDataFileKeys } from './scanDataFiles.js';
 import { runSyncConfig } from './sync-config.js';
 import { getActiveAdapterInstance } from './adapter-utils.js';
+import { resolveDocumentFallback } from './documentFallback.js';
+
+const cliDirname = path.dirname(fileURLToPath(import.meta.url));
 
 const TAILWIND_CSS_ENTRY_CANDIDATES = [
   'src/index.css',
@@ -361,30 +365,22 @@ export function detectFrameworks(cwd, config) {
 
   if (pagesDir) {
     hasPagesApp = fs.existsSync(path.join(pagesDir, '_app.jsx')) || fs.existsSync(path.join(pagesDir, '_app.tsx'));
-    
-    // Check for _document and fallback if needed
-    const docCandidates = [path.join(pagesDir, '_document.tsx'), path.join(pagesDir, '_document.jsx')];
-    let docExists = false;
-    for (const doc of docCandidates) {
-      if (fs.existsSync(doc)) {
-        docExists = true;
-        try {
-          nextDocumentFixer(doc);
-        } catch (err) {
-          console.warn(chalk.yellow(`  ⚠️  Next.js Document Fixer: ${err.message}`));
-        }
-        break;
-      }
-    }
 
-    if (!docExists && hasPagesApp) {
-      // Create fallback _document.tsx
-      const fallbackDest = path.join(pagesDir, '_document.tsx');
-      const fallbackSrc = path.join(__dirname, '../templates/nextjs/_document.tsx');
-      if (fs.existsSync(fallbackSrc)) {
-        fs.copyFileSync(fallbackSrc, fallbackDest);
-        console.log(chalk.green(`  ✓ Created fallback _document.tsx at ${path.relative(cwd, fallbackDest)}`));
+    const documentFallback = resolveDocumentFallback({
+      pagesDir,
+      hasPagesApp,
+      templatesDir: path.join(cliDirname, '../templates')
+    });
+
+    if (documentFallback.docExists) {
+      try {
+        nextDocumentFixer(documentFallback.docPath);
+      } catch (err) {
+        console.warn(chalk.yellow(`  ⚠️  Next.js Document Fixer: ${err.message}`));
       }
+    } else if (documentFallback.fallbackSrc && fs.existsSync(documentFallback.fallbackSrc)) {
+      fs.copyFileSync(documentFallback.fallbackSrc, documentFallback.fallbackDest);
+      console.log(chalk.green(`  ✓ Created fallback _document.tsx at ${path.relative(cwd, documentFallback.fallbackDest)}`));
     }
 
     if (hasPagesApp && hasNextConfig) {
