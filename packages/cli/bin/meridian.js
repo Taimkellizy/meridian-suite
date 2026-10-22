@@ -2,7 +2,6 @@
 
 import { program } from 'commander';
 import chalk from 'chalk';
-import chalkAnimation from 'chalk-animation';
 import figlet from 'figlet';
 import fs from 'fs';
 import path from 'path';
@@ -114,7 +113,6 @@ program
         targetId: qsAnswers.targetId,
         wantsCustomClass: false,
         installTailwindLogical: tailwindDetection.hasTailwind,
-        installLinters: false,
         setupCI: qsAnswers.setupCI
       };
 
@@ -134,7 +132,6 @@ program
         ...(qsAnswers.targetId ? [`Target ID: ${qsAnswers.targetId}`] : []),
         `Custom Class: false`,
         ...(tailwindDetection.hasTailwind ? ['Tailwind logical utilities: enabled'] : []),
-        `Install Linters: false`,
         `Setup GitHub CI: ${qsAnswers.setupCI ? 'true' : 'false'}`
       ];
 
@@ -239,8 +236,7 @@ program
         detected: false,
         version: null,
         install: false
-      },
-      linters: answers.installLinters
+      }
     };
 
     saveConfig(process.cwd(), configData);
@@ -309,7 +305,12 @@ jobs:
     if (keySavedMsg) console.log(keySavedMsg);
     
     // Execute Modifications
-    await runModifications(process.cwd(), configData, envData.dependencies);
+    try {
+      await runModifications(process.cwd(), configData, envData.dependencies);
+    } catch (err) {
+      console.log(chalk.red(`❌ Error: ${err.message}`));
+      process.exit(1);
+    }
   });
 
 program
@@ -331,9 +332,13 @@ program
     try {
       const config = readJsonFile(configPath);
       const spinner = createSpinner('Syncing data files...').start();
-      await runSync(process.cwd(), config, spinner, cliLanguages, options);
+      const result = await runSync(process.cwd(), config, spinner, cliLanguages, options);
+      if (result && result.ok === false) {
+        process.exitCode = 1;
+      }
     } catch (err) {
       console.log(chalk.red(`\n❌ Error running sync: ${err.message}`));
+      process.exitCode = 1;
     }
   });
 
@@ -480,7 +485,12 @@ program
 
     const runConfig = { ...config, translation: false, i18next: false, extractText: false };
 
-    await runModifications(process.cwd(), runConfig);
+    try {
+      await runModifications(process.cwd(), runConfig);
+    } catch (err) {
+      console.log(chalk.red(`❌ Error: ${err.message}`));
+      process.exit(1);
+    }
   });
 
 program

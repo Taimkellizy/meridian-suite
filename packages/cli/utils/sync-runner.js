@@ -1,6 +1,7 @@
 import fs from 'fs/promises';
 import fsSync, { existsSync } from 'fs';
 import path from 'path';
+import { createHash } from 'crypto';
 import babel from '@babel/core';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
@@ -23,18 +24,37 @@ function atomicWriteFileSync(filePath, content) {
   }
 }
 
-async function runIncrementalExtraction(projectRoot, config, options) {
-  if (options.noExtract || options.check || options.ci) return;
-  console.log(chalk.blue('\n🔍 Running Incremental Extraction...'));
-  
-  const lastSyncPath = path.join(projectRoot, '.meridian', 'last-sync');
-  let lastSyncMs = 0;
-  if (fsSync.existsSync(lastSyncPath)) {
-    try {
-      lastSyncMs = Number(fsSync.readFileSync(lastSyncPath, 'utf8').trim());
-    } catch (e) {}
+function sha256(content) {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function readLastSyncFiles(lastSyncPath) {
+  if (!fsSync.existsSync(lastSyncPath)) return {};
+  try {
+    const state = JSON.parse(fsSync.readFileSync(lastSyncPath, 'utf8'));
+    if (state && state.format === 'hash-v1' && typeof state.files === 'object' && state.files !== null) {
+      return state.files;
+    }
+  } catch (e) {
+    // Legacy (mtime) or unreadable state → full re-sync, reported below as none available
   }
-  
+  return {};
+}
+
+async function loadLocaleFile(localesDir, locale) {
+  const localePath = path.join(localesDir, `${locale}.json`);
+  if (!fsSync.existsSync(localePath)) return { path: localePath, data: {}, changed: false };
+  const data = JSON.parse(await fs.readFile(localePath, 'utf8'));
+  return { path: localePath, data, changed: false };
+}
+
+async function runIncrementalExtraction(projectRoot, config, options) {
+  if (options.noExtract || options.check || options.ci) return null;
+  console.log(chalk.blue('\n🔍 Running Incremental Extraction...'));
+
+  const lastSyncPath = path.join(projectRoot, '.meridian', 'last-sync');
+  const previousFiles = readLastSyncFiles(lastSyncPath);
+
   const dirsToScan = ['src', 'app', 'pages', 'components'];
   const targetFiles = [];
   for (const dir of dirsToScan) {
@@ -43,64 +63,67 @@ async function runIncrementalExtraction(projectRoot, config, options) {
       await walkSourceFiles(absolutePath, targetFiles);
     }
   }
-  
+
+  const defaultLang = config.defaultLanguage || 'en';
+  const availableLocales = (config.languages || [defaultLang]).filter(loc => loc !== defaultLang);
+  const localesDir = path.join(projectRoot, 'src', 'i18n', 'messages');
+  const defaultNsPath = path.join(localesDir, `${defaultLang}.json`);
+  const defaultLocale = await loadLocaleFile(localesDir, defaultLang);
+  const otherLocales = {};
+  for (const loc of availableLocales) {
+    otherLocales[loc] = await loadLocaleFile(localesDir, loc);
+  }
+
   let modifiedFilesCount = 0;
   let newStringsCount = 0;
-  const defaultLang = config.defaultLanguage || 'en';
-  const localesDir = path.join(projectRoot, 'src', 'i18n', 'messages');
-  
+  const nextFiles = {};
+
   for (const file of targetFiles) {
-    const stat = await fs.stat(file);
-    if (stat.mtimeMs > lastSyncMs) {
-      const code = await fs.readFile(file, 'utf8');
-      const relativePath = path.relative(projectRoot, file);
-      const extraction = extractAndTransformJSX(code, { fileName: relativePath, useNextI18next: config.i18next });
-      
-      if (extraction.modifiedCode !== code) {
-        atomicWriteFileSync(file, extraction.modifiedCode);
-        modifiedFilesCount++;
-        
-        if (extraction.extractedStrings && extraction.extractedStrings.size > 0) {
-          for (const [key, val] of extraction.extractedStrings.entries()) {
-            newStringsCount++;
-            
-            const defaultNsPath = path.join(localesDir, `${defaultLang}.json`);
-            let defaultData = {};
-            if (fsSync.existsSync(defaultNsPath)) {
-              defaultData = JSON.parse(await fs.readFile(defaultNsPath, 'utf8'));
-            } else {
-               fsSync.mkdirSync(path.dirname(defaultNsPath), { recursive: true });
-            }
-            if (defaultData[key] === undefined) {
-               defaultData[key] = val;
-               atomicWriteFileSync(defaultNsPath, JSON.stringify(defaultData, null, 2));
-            }
-            
-            const availableLocales = config.languages || [defaultLang];
-            for (const loc of availableLocales) {
-              if (loc === defaultLang) continue;
-              const locNsPath = path.join(localesDir, `${loc}.json`);
-              let locData = {};
-              if (fsSync.existsSync(locNsPath)) {
-                 locData = JSON.parse(await fs.readFile(locNsPath, 'utf8'));
-              } else {
-                 fsSync.mkdirSync(path.dirname(locNsPath), { recursive: true });
-              }
-              if (locData[key] === undefined) {
-                 locData[key] = "";
-                 atomicWriteFileSync(locNsPath, JSON.stringify(locData, null, 2));
-              }
-            }
+    const code = await fs.readFile(file, 'utf8');
+    const relativePath = path.relative(projectRoot, file);
+    const fileHash = sha256(code);
+    nextFiles[relativePath] = fileHash;
+    if (previousFiles[relativePath] === fileHash) continue;
+
+    const extraction = extractAndTransformJSX(code, { fileName: relativePath, useNextI18next: config.i18next });
+    if (extraction.modifiedCode === code) continue;
+
+    atomicWriteFileSync(file, extraction.modifiedCode);
+    nextFiles[relativePath] = sha256(extraction.modifiedCode);
+    modifiedFilesCount++;
+
+    if (extraction.extractedStrings && extraction.extractedStrings.size > 0) {
+      for (const [key, val] of extraction.extractedStrings.entries()) {
+        newStringsCount++;
+        if (defaultLocale.data[key] === undefined) {
+          defaultLocale.data[key] = val;
+          defaultLocale.changed = true;
+        }
+        for (const localeState of Object.values(otherLocales)) {
+          if (localeState.data[key] === undefined) {
+            localeState.data[key] = "";
+            localeState.changed = true;
           }
         }
       }
     }
   }
-  
+
+  if (defaultLocale.changed) {
+    atomicWriteFileSync(defaultNsPath, JSON.stringify(defaultLocale.data, null, 2));
+  }
+  for (const localeState of Object.values(otherLocales)) {
+    if (localeState.changed) {
+      atomicWriteFileSync(localeState.path, JSON.stringify(localeState.data, null, 2));
+    }
+  }
+
   if (modifiedFilesCount > 0) {
     saveKeyMap();
     console.log(chalk.green(`  ✓ Found ${newStringsCount} new string(s) in ${modifiedFilesCount} file(s) — wrapped and added to locale files. Run 'meridian sync <locales>' to translate.`));
   }
+
+  return nextFiles;
 }
 
 /**
@@ -365,15 +388,15 @@ async function loadExistingTranslations(translationPath) {
  * @param {Set<string>} validKeys - The union of valid keys.
  * @param {Object} options - CLI options.
  * @param {Object} config - Project configuration.
+ * @returns {Promise<{ok: boolean}>} Whether the check passes for CI purposes.
  */
 async function runReconciliationCheck(projectRoot, defaultLang, validKeys, options, config) {
   console.log(chalk.blue('\n🔍 Running Translation Reconciliation Check...'));
-  
+
   const localesDir = path.join(projectRoot, 'src', 'i18n', 'messages');
   if (!existsSync(localesDir)) {
     console.log(chalk.red('  ❌ Locales directory not found.'));
-    if (options.ci) process.exit(1);
-    return;
+    return { ok: false };
   }
 
   const availableLocales = fsSync.readdirSync(localesDir)
@@ -382,8 +405,7 @@ async function runReconciliationCheck(projectRoot, defaultLang, validKeys, optio
 
   if (!availableLocales.includes(defaultLang)) {
     console.log(chalk.red(`  ❌ Default locale '${defaultLang}' not found.`));
-    if (options.ci) process.exit(1);
-    return;
+    return { ok: false };
   }
 
   const namespaces = [defaultLang];
@@ -450,20 +472,23 @@ async function runReconciliationCheck(projectRoot, defaultLang, validKeys, optio
 
   const coveragePct = totalKeys === 0 ? 100 : (totalCoveredKeys / totalKeys) * 100;
   const threshold = config.translationCoverageThreshold || 100;
-  
+
   console.log(chalk.cyan(`Overall Coverage: ${coveragePct.toFixed(2)}% (Target: ${threshold}%)`));
 
+  const coverageFailed = coveragePct < threshold;
+  const orphansFailed = hasOrphans && !options.prune;
+
   if (options.ci) {
-    if (coveragePct < threshold) {
+    if (coverageFailed) {
       console.log(chalk.red(`\n❌ CI Check Failed: Coverage (${coveragePct.toFixed(2)}%) is below threshold (${threshold}%).`));
-      process.exit(1);
-    } else if (hasOrphans && !options.prune) {
+    } else if (orphansFailed) {
       console.log(chalk.red(`\n❌ CI Check Failed: Orphaned keys exist. Please run 'meridian sync --prune' to clean them up.`));
-      process.exit(1);
     } else {
       console.log(chalk.green(`\n✅ CI Check Passed!`));
     }
   }
+
+  return { ok: !coverageFailed && !orphansFailed };
 }
 
 /**
@@ -475,25 +500,14 @@ async function runReconciliationCheck(projectRoot, defaultLang, validKeys, optio
  * @param {Object} spinner - Ora spinner instance.
  * @param {string[]} cliLanguages - Languages specified in the CLI.
  * @param {Object} options - Sync CLI flags.
- */
-
-
-/**
- * Main orchestration function for Meridian Sync.
- * Coordinates detection, extraction, syncing, and reconciliation.
- *
- * @param {string} projectRoot - Root of the project.
- * @param {Object} config - Configuration object.
- * @param {Object} spinner - Ora spinner instance.
- * @param {string[]} cliLanguages - Languages specified in the CLI.
- * @param {Object} options - Sync CLI flags.
+ * @returns {Promise<{ok: boolean}>} Whether the sync/check succeeded.
  */
 export async function runSync(projectRoot, config, spinner, cliLanguages, options = {}) {
   const adapter = getActiveAdapterInstance(projectRoot);
 
   detectFrameworks(projectRoot, config);
 
-  await runIncrementalExtraction(projectRoot, config, options);
+  const nextFileHashes = await runIncrementalExtraction(projectRoot, config, options);
 
   const defaultLang = config.defaultLanguage || 'en';
   const translationPath = path.join(projectRoot, 'src', 'i18n', 'messages', `${defaultLang}.json`);
@@ -501,7 +515,7 @@ export async function runSync(projectRoot, config, spinner, cliLanguages, option
   const existingTranslations = await loadExistingTranslations(translationPath);
   if (!existingTranslations) {
     spinner.fail({ text: 'Failed to parse canonical default language JSON file' });
-    return;
+    return { ok: false };
   }
 
   const activeFlatKeys = await extractFlatKeysFromSource(projectRoot);
@@ -589,8 +603,8 @@ export async function runSync(projectRoot, config, spinner, cliLanguages, option
 
   if (isReadOnly) {
     spinner.stop();
-    await runReconciliationCheck(projectRoot, defaultLang, validKeys, options, config);
-    return;
+    const check = await runReconciliationCheck(projectRoot, defaultLang, validKeys, options, config);
+    return { ok: check.ok };
   }
 
   await writeTranslations(translationPath, existingTranslations, deltas, options);
@@ -621,8 +635,10 @@ export async function runSync(projectRoot, config, spinner, cliLanguages, option
 
   // Write state files only on full successful completion
   atomicWriteFileSync(lastDataScanPath, JSON.stringify(currentDataScan, null, 2));
-  const lastSyncPath = path.join(projectRoot, '.meridian', 'last-sync');
-  atomicWriteFileSync(lastSyncPath, Date.now().toString());
+  if (nextFileHashes) {
+    const lastSyncPath = path.join(projectRoot, '.meridian', 'last-sync');
+    atomicWriteFileSync(lastSyncPath, JSON.stringify({ format: 'hash-v1', files: nextFileHashes }, null, 2));
+  }
 
   // Call adapter's writeLocaleFiles
   try {
@@ -630,4 +646,6 @@ export async function runSync(projectRoot, config, spinner, cliLanguages, option
   } catch (err) {
     console.log(chalk.red(`  ❌ Failed to write adapter locale files: ${err.message}`));
   }
+
+  return { ok: true };
 }

@@ -27,8 +27,7 @@ export function getActiveAdapterInstance(cwd) {
       const detected = detectAdapter(cwd);
       adapterName = detected.name;
     } catch (err) {
-      console.log(chalk.red(`❌ Error: ${err.message}`));
-      process.exit(1);
+      throw new Error(`Could not determine the translation adapter. ${err.message}`);
     }
   }
 

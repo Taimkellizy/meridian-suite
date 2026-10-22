@@ -1,7 +1,8 @@
 import fs from 'fs';
-import path from 'path';
 import os from 'os';
-import assert from 'assert';
+import path from 'path';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { runSync } from '../utils/sync-runner.js';
 import { resetKeyGeneratorStateForTesting } from '@meridian/core';
 
@@ -12,90 +13,106 @@ const mockSpinner = {
   success: console.log
 };
 
-async function runTest() {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'meridian-test-migration-'));
-  console.log('Testing in:', tmpDir);
-  
-  // 1. Setup config
-  fs.writeFileSync(path.join(tmpDir, '.meridianrc.json'), JSON.stringify({
+function makeDataProject() {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'meridian-sync-migration-'));
+  fs.writeFileSync(path.join(projectRoot, '.meridianrc.json'), JSON.stringify({
     languages: ['en', 'ar'],
     defaultLanguage: 'en',
     dataFiles: ['src/data.json']
   }));
-  
-  fs.mkdirSync(path.join(tmpDir, 'src'));
-  fs.writeFileSync(path.join(tmpDir, 'src', 'data.json'), JSON.stringify({
+  fs.mkdirSync(path.join(projectRoot, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, 'src', 'data.json'), JSON.stringify({
     title: 'Hello',
     description: 'World'
   }));
-
-  fs.mkdirSync(path.join(tmpDir, '.meridian'), { recursive: true });
-  fs.writeFileSync(path.join(tmpDir, '.meridian', 'config.json'), JSON.stringify({ adapter: 'next-i18next' }));
-
-  fs.mkdirSync(path.join(tmpDir, 'src', 'i18n', 'messages'), { recursive: true });
-  
-  fs.writeFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'en.json'), JSON.stringify({
+  fs.mkdirSync(path.join(projectRoot, '.meridian'), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, '.meridian', 'config.json'), JSON.stringify({ adapter: 'next-i18next' }));
+  fs.mkdirSync(path.join(projectRoot, 'src', 'i18n', 'messages'), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'en.json'), JSON.stringify({
     'Hello': 'Hello',
     'World': 'World'
   }));
-  fs.writeFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'ar.json'), JSON.stringify({
+  fs.writeFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'ar.json'), JSON.stringify({
     'Hello': 'مرحبا',
     'World': 'عالم'
   }));
-  
-  const config = JSON.parse(fs.readFileSync(path.join(tmpDir, '.meridianrc.json'), 'utf8'));
+  return projectRoot;
+}
 
-  // First sync to set up last-data-scan
+function readJson(projectRoot, ...segments) {
+  return JSON.parse(fs.readFileSync(path.join(projectRoot, ...segments), 'utf8'));
+}
+
+function captureConsoleLog() {
+  const originalLog = console.log;
+  const lines = [];
+  console.log = (...args) => { lines.push(args.join(' ')); };
+  return {
+    lines,
+    restore() { console.log = originalLog; }
+  };
+}
+
+test('data scan records promoted keys after first sync', async () => {
   resetKeyGeneratorStateForTesting();
-  await runSync(tmpDir, config, mockSpinner, [], {});
-  
-  // Verify last-data-scan
-  const scanContent = JSON.parse(fs.readFileSync(path.join(tmpDir, '.meridian', 'last-data-scan.json'), 'utf8'));
-  assert.strictEqual(scanContent['src/data.json']['title'], 'Hello');
-  assert.strictEqual(scanContent['src/data.json']['description'], 'World');
-  
-  // Modify data.json
-  fs.writeFileSync(path.join(tmpDir, 'src', 'data.json'), JSON.stringify({
+  const projectRoot = makeDataProject();
+  const config = readJson(projectRoot, '.meridianrc.json');
+
+  const result = await runSync(projectRoot, config, mockSpinner, [], {});
+
+  assert.equal(result.ok, true);
+  const scan = readJson(projectRoot, '.meridian', 'last-data-scan.json');
+  assert.equal(scan['src/data.json']['title'], 'Hello');
+  assert.equal(scan['src/data.json']['description'], 'World');
+});
+
+test('--migrate-value carries translations forward when a data value is edited', async () => {
+  resetKeyGeneratorStateForTesting();
+  const projectRoot = makeDataProject();
+  const config = readJson(projectRoot, '.meridianrc.json');
+
+  await runSync(projectRoot, config, mockSpinner, [], {});
+
+  fs.writeFileSync(path.join(projectRoot, 'src', 'data.json'), JSON.stringify({
     title: 'Hello Everyone',
     description: 'World'
   }));
-  
-  // Second sync with --migrate-value
-  resetKeyGeneratorStateForTesting();
-  await runSync(tmpDir, config, mockSpinner, [], { migrateValue: true });
-  
-  const enTranslations = JSON.parse(fs.readFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'en.json'), 'utf8'));
-  const arTranslations = JSON.parse(fs.readFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'ar.json'), 'utf8'));
-  
-  // Assertions
-  assert.strictEqual(enTranslations['Hello Everyone'], 'Hello Everyone');
-  assert.strictEqual(enTranslations['Hello'], undefined, 'Old key should be removed from EN');
-  
-  assert.strictEqual(arTranslations['Hello Everyone'], 'مرحبا', 'Arabic translation should be migrated');
-  assert.strictEqual(arTranslations['Hello'], undefined, 'Old key should be removed from AR');
-  
-  // Third sync with --migrate-value (Idempotency test)
-  resetKeyGeneratorStateForTesting();
-  
-  // Capture console.log to ensure no warnings or output about migration
-  const oldLog = console.log;
-  let logOutput = '';
-  console.log = (msg) => {
-    logOutput += msg + '\n';
-    oldLog(msg);
-  };
-  
-  await runSync(tmpDir, config, mockSpinner, [], { migrateValue: true });
-  
-  console.log = oldLog;
-  
-  assert.ok(!logOutput.includes('Migrating value edits'), 'Should not migrate again');
-  assert.ok(!logOutput.includes('⚠ Detected a likely value edit'), 'Should not warn about edits');
-  
-  console.log('✅ sync-migration.test.js passed!');
-}
 
-runTest().catch(err => {
-  console.error('❌ sync-migration.test.js failed:', err);
-  process.exit(1);
+  resetKeyGeneratorStateForTesting();
+  const result = await runSync(projectRoot, config, mockSpinner, [], { migrateValue: true });
+
+  assert.equal(result.ok, true);
+  const enTranslations = readJson(projectRoot, 'src', 'i18n', 'messages', 'en.json');
+  const arTranslations = readJson(projectRoot, 'src', 'i18n', 'messages', 'ar.json');
+
+  assert.equal(enTranslations['Hello Everyone'], 'Hello Everyone');
+  assert.equal(enTranslations['Hello'], undefined, 'old key removed from en');
+
+  assert.equal(arTranslations['Hello Everyone'], 'مرحبا', 'arabic translation migrated');
+  assert.equal(arTranslations['Hello'], undefined, 'old key removed from ar');
+});
+
+test('migration is idempotent — no value-edit warning on repeat', async () => {
+  resetKeyGeneratorStateForTesting();
+  const projectRoot = makeDataProject();
+  const config = readJson(projectRoot, '.meridianrc.json');
+
+  await runSync(projectRoot, config, mockSpinner, [], {});
+  fs.writeFileSync(path.join(projectRoot, 'src', 'data.json'), JSON.stringify({
+    title: 'Hello Everyone',
+    description: 'World'
+  }));
+  resetKeyGeneratorStateForTesting();
+  await runSync(projectRoot, config, mockSpinner, [], { migrateValue: true });
+
+  const capture = captureConsoleLog();
+  try {
+    await runSync(projectRoot, config, mockSpinner, [], { migrateValue: true });
+  } finally {
+    capture.restore();
+  }
+  const output = capture.lines.join('\n');
+
+  assert.ok(!output.includes('Migrating value edits'), 'should not migrate again');
+  assert.ok(!output.includes('⚠ Detected a likely value edit'), 'should not warn about edits');
 });
