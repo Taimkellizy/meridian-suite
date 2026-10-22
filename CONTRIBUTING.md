@@ -30,7 +30,7 @@ All types of contributions are encouraged and valued. See the [Table of Contents
 ## Code of Conduct
 
 This project and everyone participating in it is governed by the
-[Meridian-suite Code of Conduct](https://github.com/Taimkellizy/meridian-suite/blob//CODE_OF_CONDUCT.md).
+[Meridian-suite Code of Conduct](https://github.com/Taimkellizy/meridian-suite/blob/main/CODE_OF_CONDUCT.md).
 By participating, you are expected to uphold this code. Please report unacceptable behavior
 to <taimkellizy@gmail.com>.
 
@@ -162,26 +162,35 @@ To get started with local development on Meridian:
    npm run build
    ```
 
+4. **Branch and PR workflow**
+
+   Meridian uses GitHub Flow: `main` is the only permanent branch, and direct pushes to it are blocked.
+
+   - Branch off `main` using a short-lived prefix: `feat/*`, `fix/*`, `chore/*`, or `docs/*`.
+   - Follow [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, `chore:`, `docs:`).
+   - Open a pull request; CI runs the full test suite on Node 20 and 22 and must be green.
+   - Every feature or fix PR must include tests and a changeset (see [Deployment](#deployment-publishing)).
+   - Pull requests are squash-merged, so one feature = one commit on `main`.
+
 ### Testing
 
-Meridian takes AST mutation seriously. Each package has its own extensive test suite. To test the entire workspace context:
+Meridian takes AST mutation seriously. To test the entire workspace:
 
 ```bash
-# Run all tests across workspaces
 npm test
 ```
 
-#### Writing Tests
-
-Tests are localized inside each respective workspace component's `__tests__` directory, simulating AST manipulation results.
-
-Example structure:
+Tests run with the built-in Node test runner (`node --test`) and live next to the code they cover, plus under `packages/cli/test/`:
 
 ```text
-packages/core/__tests__/
-  cssFixer.test.js
-  babelExtractor.test.js
+packages/core/src/utils/*.test.js
+packages/core/src/utils/i18n/*.test.js
+packages/core/src/extractors/*.test.js
+packages/core/src/translator/utils/*.test.js
+packages/cli/test/*.test.js
 ```
+
+When writing tests that touch files, always create fixtures in a temporary directory (`fs.mkdtempSync` under `os.tmpdir()`), never inside the repository.
 
 ### Deployment (Publishing)
 
@@ -207,7 +216,7 @@ _(Note: Internal configurations ensure the `apps/_` directory is securely ignore
 #### Auto-Translation Rate Limit
 
 **Error:** API responses with status 429 Too Many Requests.
-**Solution:** The translation utility handles batch delays automatically. However, if using the Google Translate or DeepL free tiers, refer to the dashboard limitations. Wait a few hours before executing `meridian translate --update`.
+**Solution:** The translation utility handles batch delays automatically. However, if using the Google Translate or DeepL free tiers, refer to the dashboard limitations. Wait a few hours before running `meridian translate` again.
 
 <!-- omit in toc -->
 

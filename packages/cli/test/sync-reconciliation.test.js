@@ -1,24 +1,26 @@
-import fs from 'fs/promises';
+import fs from 'fs';
+import os from 'os';
 import path from 'path';
-import { fileURLToPath } from 'url';
-import assert from 'assert';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { runSync } from '../utils/sync-runner.js';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const spinnerMock = {
+  start: () => spinnerMock,
+  stop: () => spinnerMock,
+  succeed: () => {},
+  fail: () => {},
+  success: () => {}
+};
 
-async function runTests() {
-  console.log('Running Sync Reconciliation Tests...');
-  
-  const fixtureDir = path.join(__dirname, 'fixtures', 'sync-test-project');
-  
-  // 1. Setup fixtures
-  await fs.mkdir(path.join(fixtureDir, '.meridian'), { recursive: true });
-  await fs.writeFile(path.join(fixtureDir, '.meridian', 'config.json'), JSON.stringify({ adapter: 'next-i18next' }));
+function makeReconciliationProject() {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'meridian-sync-reconciliation-'));
 
-  await fs.mkdir(path.join(fixtureDir, 'src', 'i18n', 'messages'), { recursive: true });
-  await fs.mkdir(path.join(fixtureDir, 'src', 'config'), { recursive: true });
-  await fs.mkdir(path.join(fixtureDir, 'src', 'components'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'src', 'config'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'src', 'i18n', 'messages'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, 'src', 'components'), { recursive: true });
+  fs.mkdirSync(path.join(projectRoot, '.meridian'), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, '.meridian', 'config.json'), JSON.stringify({ adapter: 'next-i18next' }));
 
   const configJson = {
     pricing: {
@@ -27,83 +29,77 @@ async function runTests() {
       ]
     }
   };
-  
   const enTranslations = {
     "Free": "Free",
     "for one user": "for one user",
     "Some static key": "Some static key"
   };
-  
   const arTranslations = {
     "Free": "مجانًا",
     "for one user": "لمستخدم واحد"
   };
-  
   const headerTsx = `
     export default function Header() {
       return <div>{t('Some static key')}</div>;
     }
   `;
 
-  await fs.writeFile(path.join(fixtureDir, 'src', 'config', 'index.json'), JSON.stringify(configJson, null, 2));
-  await fs.writeFile(path.join(fixtureDir, 'src', 'i18n', 'messages', 'en.json'), JSON.stringify(enTranslations, null, 2));
-  await fs.writeFile(path.join(fixtureDir, 'src', 'i18n', 'messages', 'ar.json'), JSON.stringify(arTranslations, null, 2));
-  await fs.writeFile(path.join(fixtureDir, 'src', 'components', 'Header.tsx'), headerTsx);
+  fs.writeFileSync(path.join(projectRoot, 'src', 'config', 'index.json'), JSON.stringify(configJson, null, 2));
+  fs.writeFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'en.json'), JSON.stringify(enTranslations, null, 2));
+  fs.writeFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'ar.json'), JSON.stringify(arTranslations, null, 2));
+  fs.writeFileSync(path.join(projectRoot, 'src', 'components', 'Header.tsx'), headerTsx);
 
-  const config = {
-    defaultLanguage: 'en',
-    translationCoverageThreshold: 100
+  return {
+    projectRoot,
+    config: { defaultLanguage: 'en', translationCoverageThreshold: 100 }
   };
-
-  const spinnerMock = {
-    start: () => {},
-    stop: () => {},
-    succeed: () => {},
-    fail: () => {},
-    success: () => {}
-  };
-
-  // Mock console.log
-  const originalLog = console.log;
-  let logOutput = [];
-  console.log = (...args) => {
-    logOutput.push(args.join(' '));
-  };
-
-  // Run 1: Check mode
-  await runSync(fixtureDir, config, spinnerMock, [], { check: true });
-  
-  const output1 = logOutput.join('\n');
-  
-  // Assert no orphans
-  assert(!output1.includes('orphaned keys'), 'Should not flag data-promoted keys as orphaned');
-  // Assert ar is missing "Some static key"
-  assert(output1.includes('[ar] Missing 1 translations'), 'Should flag missing static key in ar');
-  // Assert coverage is not 100%
-  assert(output1.includes('Overall Coverage: 66.67%'), 'Coverage should be accurately calculated');
-
-  // Assert _data is never written
-  const postEn = JSON.parse(await fs.readFile(path.join(fixtureDir, 'src', 'i18n', 'messages', 'en.json'), 'utf8'));
-  assert(postEn._data === undefined, '_data should not exist in output');
-
-  // Clear logs
-  logOutput = [];
-
-  // Run 2: Check mode again (Idempotency)
-  await runSync(fixtureDir, config, spinnerMock, [], { check: true });
-  const output2 = logOutput.join('\n');
-
-  assert.strictEqual(output1, output2, 'Sync check should be idempotent and produce identical output');
-
-  // Restore console
-  console.log = originalLog;
-  console.log('✅ All tests passed!');
-  
-  // Cleanup
-  await fs.rm(fixtureDir, { recursive: true, force: true });
 }
 
-runTests().catch(e => {
-  console.error('Test failed!', e);
-  process.exit(1);
+function captureConsoleLog() {
+  const originalLog = console.log;
+  const lines = [];
+  console.log = (...args) => { lines.push(args.join(' ')); };
+  return {
+    lines,
+    restore() { console.log = originalLog; }
+  };
+}
+
+test('check mode reports coverage and never mutates locale files', async () => {
+  const { projectRoot, config } = makeReconciliationProject();
+
+  let output;
+  let result;
+  const capture = captureConsoleLog();
+  try {
+    result = await runSync(projectRoot, config, spinnerMock, [], { check: true });
+  } finally {
+    capture.restore();
+  }
+  output = capture.lines.join('\n');
+
+  assert.equal(result.ok, false, 'coverage below threshold fails the check');
+  assert.ok(!output.includes('orphaned keys'), 'data-promoted keys not flagged as orphaned');
+  assert.ok(output.includes('[ar] Missing 1 translations'), 'missing static key flagged for ar');
+  assert.ok(output.includes('Overall Coverage: 66.67%'), 'coverage calculated correctly');
+
+  const postEn = JSON.parse(fs.readFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'en.json'), 'utf8'));
+  assert.equal(postEn._data, undefined, '_data must not be written');
+});
+
+test('check mode is idempotent — identical report on repeat', async () => {
+  const { projectRoot, config } = makeReconciliationProject();
+
+  const outputs = [];
+  for (let i = 0; i < 2; i++) {
+    const capture = captureConsoleLog();
+    try {
+      await runSync(projectRoot, config, spinnerMock, [], { check: true });
+    } finally {
+      capture.restore();
+    }
+    outputs.push(capture.lines.join('\n'));
+  }
+
+  assert.equal(outputs[0], outputs[1], 'sync --check produces identical output');
 });

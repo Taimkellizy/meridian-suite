@@ -330,12 +330,6 @@ export function getAdvancedQuestions(tailwindDetection) {
     },
     {
       type: 'confirm',
-      name: 'installLinters',
-      message: 'Do you want to install ESLint/Stylelint plugins?',
-      default: true
-    },
-    {
-      type: 'confirm',
       name: 'setupCI',
       message: 'Do you want to set up a GitHub Action CI workflow to automatically check for un-synced i18n keys on PRs?',
       default: true

@@ -1,7 +1,8 @@
 import fs from 'fs';
-import path from 'path';
 import os from 'os';
-import assert from 'assert';
+import path from 'path';
+import test from 'node:test';
+import assert from 'node:assert/strict';
 import { runSync } from '../utils/sync-runner.js';
 import { resetKeyGeneratorStateForTesting } from '@meridian/core';
 
@@ -12,99 +13,104 @@ const mockSpinner = {
   success: console.log
 };
 
-async function runTest() {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'meridian-test-incremental-'));
-  console.log('Testing in:', tmpDir);
-  
-  // 1. Setup config
-  fs.writeFileSync(path.join(tmpDir, '.meridianrc.json'), JSON.stringify({
+function makeProject() {
+  const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'meridian-sync-incremental-'));
+  fs.writeFileSync(path.join(projectRoot, '.meridianrc.json'), JSON.stringify({
     languages: ['en', 'ar'],
-    defaultLanguage: 'en',
+    defaultLanguage: 'en'
   }));
-  
-  fs.mkdirSync(path.join(tmpDir, 'src'));
-  fs.writeFileSync(path.join(tmpDir, 'src', 'App.jsx'), `
+  fs.mkdirSync(path.join(projectRoot, 'src'));
+  fs.writeFileSync(path.join(projectRoot, 'src', 'App.jsx'), `
     export default function App() {
       return <div>Original Text</div>;
     }
   `);
+  fs.mkdirSync(path.join(projectRoot, '.meridian'), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, '.meridian', 'config.json'), JSON.stringify({ adapter: 'next-i18next' }));
+  fs.mkdirSync(path.join(projectRoot, 'src', 'i18n', 'messages'), { recursive: true });
+  fs.writeFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'en.json'), JSON.stringify({}));
+  fs.writeFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'ar.json'), JSON.stringify({}));
+  return projectRoot;
+}
 
-  fs.mkdirSync(path.join(tmpDir, '.meridian'), { recursive: true });
-  fs.writeFileSync(path.join(tmpDir, '.meridian', 'config.json'), JSON.stringify({ adapter: 'next-i18next' }));
+function readJson(projectRoot, ...segments) {
+  return JSON.parse(fs.readFileSync(path.join(projectRoot, ...segments), 'utf8'));
+}
 
-  fs.mkdirSync(path.join(tmpDir, 'src', 'i18n', 'messages'), { recursive: true });
-  fs.writeFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'en.json'), JSON.stringify({}));
-  fs.writeFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'ar.json'), JSON.stringify({}));
-  
-  const config = JSON.parse(fs.readFileSync(path.join(tmpDir, '.meridianrc.json'), 'utf8'));
-
-  // First sync
+test('incremental extraction wraps strings and seeds locale files', async () => {
   resetKeyGeneratorStateForTesting();
-  await runSync(tmpDir, config, mockSpinner, [], {});
-  
-  const originalEnTranslations = JSON.parse(fs.readFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'en.json'), 'utf8'));
-  const originalKeys = Object.keys(originalEnTranslations);
-  assert.strictEqual(originalKeys.length, 1);
-  const keyName = originalKeys[0];
-  
-  // Wait to ensure mtime is strictly greater
-  await new Promise(r => setTimeout(r, 100));
-  
-  // Add new string
-  fs.writeFileSync(path.join(tmpDir, 'src', 'App.jsx'), `
+  const projectRoot = makeProject();
+
+  const result = await runSync(projectRoot, readJson(projectRoot, '.meridianrc.json'), mockSpinner, [], {});
+  assert.equal(result.ok, true);
+
+  const enTranslations = readJson(projectRoot, 'src', 'i18n', 'messages', 'en.json');
+  assert.equal(Object.keys(enTranslations).length, 1, 'one key extracted');
+  const keyName = Object.keys(enTranslations)[0];
+
+  const appCode = fs.readFileSync(path.join(projectRoot, 'src', 'App.jsx'), 'utf8');
+  assert.ok(appCode.includes(`t("${keyName}")`), 'source wrapped in t()');
+
+  const arTranslations = readJson(projectRoot, 'src', 'i18n', 'messages', 'ar.json');
+  assert.equal(arTranslations[keyName], '');
+});
+
+test('second run with no changes is a no-op', async () => {
+  resetKeyGeneratorStateForTesting();
+  const projectRoot = makeProject();
+  const config = readJson(projectRoot, '.meridianrc.json');
+
+  await runSync(projectRoot, config, mockSpinner, [], {});
+  const enAfterFirst = fs.readFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'en.json'), 'utf8');
+  const appAfterFirst = fs.readFileSync(path.join(projectRoot, 'src', 'App.jsx'), 'utf8');
+
+  const result = await runSync(projectRoot, config, mockSpinner, [], {});
+
+  assert.equal(result.ok, true);
+  assert.equal(fs.readFileSync(path.join(projectRoot, 'src', 'i18n', 'messages', 'en.json'), 'utf8'), enAfterFirst, 'locale file untouched');
+  assert.equal(fs.readFileSync(path.join(projectRoot, 'src', 'App.jsx'), 'utf8'), appAfterFirst, 'source untouched');
+});
+
+test('editing a source file is detected via content hash, not mtime', async () => {
+  resetKeyGeneratorStateForTesting();
+  const projectRoot = makeProject();
+  const config = readJson(projectRoot, '.meridianrc.json');
+
+  await runSync(projectRoot, config, mockSpinner, [], {});
+  const keyName = Object.keys(readJson(projectRoot, 'src', 'i18n', 'messages', 'en.json'))[0];
+
+  fs.writeFileSync(path.join(projectRoot, 'src', 'App.jsx'), `
     import { useTranslation } from 'react-i18next';
     export default function App() {
       const { t } = useTranslation();
       return (
         <div>
           {t('${keyName}')}
-          <span>New Hardcoded Text</span>
+          <span>Brand New Text</span>
         </div>
       );
     }
   `);
-  
-  // Second sync
-  resetKeyGeneratorStateForTesting();
-  await runSync(tmpDir, config, mockSpinner, [], {});
-  
-  const modifiedCode = fs.readFileSync(path.join(tmpDir, 'src', 'App.jsx'), 'utf8');
-  assert.ok(!modifiedCode.includes('>New Hardcoded Text<'), 'Should remove raw New Hardcoded Text');
-  assert.ok(modifiedCode.includes('t('), 'Should have t()');
-  
-  const enTranslations = JSON.parse(fs.readFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'en.json'), 'utf8'));
-  const arTranslations = JSON.parse(fs.readFileSync(path.join(tmpDir, 'src', 'i18n', 'messages', 'ar.json'), 'utf8'));
-  
-  const newKeys = Object.keys(enTranslations).filter(k => k !== keyName);
-  assert.strictEqual(newKeys.length, 1);
-  const newKeyName = newKeys[0];
-  
-  assert.strictEqual(enTranslations[newKeyName], 'New Hardcoded Text');
-  assert.strictEqual(arTranslations[newKeyName], ''); // Should be empty string placeholder
-  
-  // Third sync (Idempotency test)
-  resetKeyGeneratorStateForTesting();
-  
-  const oldLog = console.log;
-  let logOutput = '';
-  console.log = (msg) => {
-    logOutput += msg + '\n';
-    oldLog(msg);
-  };
-  
-  await runSync(tmpDir, config, mockSpinner, [], {});
-  
-  console.log = oldLog;
-  
-  assert.ok(!logOutput.includes('Found '), 'Should produce no output about found strings');
-  const codeAfterThirdSync = fs.readFileSync(path.join(tmpDir, 'src', 'App.jsx'), 'utf8');
-  assert.strictEqual(codeAfterThirdSync, modifiedCode, 'File should not be changed on second run');
-  assert.ok(codeAfterThirdSync.includes(`t('${keyName}')`), 'Already extracted string should not be modified');
-  
-  console.log('✅ sync-incremental.test.js passed!');
-}
 
-runTest().catch(err => {
-  console.error('❌ sync-incremental.test.js failed:', err);
-  process.exit(1);
+  const result = await runSync(projectRoot, config, mockSpinner, [], {});
+
+  assert.equal(result.ok, true);
+  const enTranslations = readJson(projectRoot, 'src', 'i18n', 'messages', 'en.json');
+  assert.ok(Object.values(enTranslations).includes('Brand New Text'), 'new string extracted');
+});
+
+test('legacy mtime last-sync state falls back to a full re-sync', async () => {
+  resetKeyGeneratorStateForTesting();
+  const projectRoot = makeProject();
+  const config = readJson(projectRoot, '.meridianrc.json');
+
+  fs.writeFileSync(path.join(projectRoot, '.meridian', 'last-sync'), Date.now().toString());
+
+  const result = await runSync(projectRoot, config, mockSpinner, [], {});
+
+  assert.equal(result.ok, true);
+  assert.equal(Object.keys(readJson(projectRoot, 'src', 'i18n', 'messages', 'en.json')).length, 1, 'extraction ran');
+
+  const state = JSON.parse(fs.readFileSync(path.join(projectRoot, '.meridian', 'last-sync'), 'utf8'));
+  assert.equal(state.format, 'hash-v1', 'state upgraded to hash format');
 });

@@ -16,8 +16,5 @@
   "devDependencies": {
     "@changesets/cli": "^2.30.0",
     "turbo": "^2.9.6"
-  },
-  "dependencies": {
-    "tailwindcss-logical": "^2.0.0"
   }
 }
